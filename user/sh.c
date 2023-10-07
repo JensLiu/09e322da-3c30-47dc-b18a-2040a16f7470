@@ -20,14 +20,14 @@ struct cmd {
 struct execcmd {
   int type;
   char *argv[MAXARGS];
-  char *eargv[MAXARGS];
+  char *eargv[MAXARGS];     // end of each arg -> replace with null, see *nulterminate*
 };
 
 struct redircmd {
   int type;
   struct cmd *cmd;
   char *file;
-  char *efile;
+  char *efile;              // end of the filename string -> replace with null, see *nulterminate*
   int mode;
   int fd;
 };
@@ -82,43 +82,43 @@ runcmd(struct cmd *cmd)
 
   case REDIR:
     rcmd = (struct redircmd*)cmd;
-    close(rcmd->fd);
-    if(open(rcmd->file, rcmd->mode) < 0){
+    close(rcmd->fd);                                // in construction, '>' command has a fd of 0. see *parseredirs*.
+    if(open(rcmd->file, rcmd->mode) < 0){           // hence the new file opened would take descriptor 0 -> as standard input
       fprintf(2, "open %s failed\n", rcmd->file);
       exit(1);
     }
     runcmd(rcmd->cmd);
     break;
 
-  case LIST:
+  case LIST:                                        // ';' separated list
     lcmd = (struct listcmd*)cmd;
     if(fork1() == 0)
-      runcmd(lcmd->left);
-    wait(0);
-    runcmd(lcmd->right);
+      runcmd(lcmd->left);                           // execute left subtree
+    wait(0);                                        // wait for it to terminate
+    runcmd(lcmd->right);                            // execute right subtree
     break;
 
   case PIPE:
     pcmd = (struct pipecmd*)cmd;
     if(pipe(p) < 0)
       panic("pipe");
-    if(fork1() == 0){
-      close(1);
-      dup(p[1]);
+    if(fork1() == 0){     // child process 1: left subtree
+      close(1);           // close stdout
+      dup(p[1]);          // now: 1 is the writing end of the pipe
       close(p[0]);
       close(p[1]);
       runcmd(pcmd->left);
     }
-    if(fork1() == 0){
-      close(0);
-      dup(p[0]);
+    if(fork1() == 0){     // child process 2: right subtree
+      close(0);           // close stdin
+      dup(p[0]);          // now 0 is the reading end of the pipe
       close(p[0]);
       close(p[1]);
       runcmd(pcmd->right);
-    }
+    }                     // parent procecss
     close(p[0]);
-    close(p[1]);
-    wait(0);
+    close(p[1]);          // close the writing end: otherwise 'read' will block forever in the right child process (xv6 book P16)
+    wait(0);              // wait for both child to end
     wait(0);
     break;
 
@@ -264,48 +264,51 @@ char whitespace[] = " \t\r\n\v";
 char symbols[] = "<|>&;()";
 
 int
-gettoken(char **ps, char *es, char **q, char **eq)
+gettoken(char **ps, char *es, char **q, char **eq) 
 {
-  char *s;
+  // args: ps: begin scan position ptr (will update), es: end scan position; 
+  //       q: begin token position ptr (will update), eq: end toke position ptr / one pos after the token (will update)
+  
+  char *s;  // current pointer
   int ret;
 
   s = *ps;
-  while(s < es && strchr(whitespace, *s))
+  while(s < es && strchr(whitespace, *s))   // skip whitespace at the beginning
     s++;
-  if(q)
+  if(q)                                     // set q to the beginning of the token
     *q = s;
   ret = *s;
   switch(*s){
-  case 0:
+  case 0:                                   // if it is the end of string, return 0 (since ret = *s = 0)
     break;
   case '|':
   case '(':
   case ')':
   case ';':
   case '&':
-  case '<':
-    s++;
+  case '<':                                 // for | ( ) ; & < chars, move one pos forward, return as a saparate token
+    s++;                                    // with the result being itself (since ret = *s)
     break;
-  case '>':
-    s++;
+  case '>':                                 // for >, return itself
+    s++;                                    // for >>, set ret to '+' so that the function constructing redirection can know
     if(*s == '>'){
       ret = '+';
       s++;
     }
     break;
-  default:
-    ret = 'a';
+  default:                                  // for other chars, set ret to 'a' and then advance to find the end of the token
+    ret = 'a';                              // stops when reading specified chars from 'whitespace' and 'symbols' array
     while(s < es && !strchr(whitespace, *s) && !strchr(symbols, *s))
       s++;
     break;
-  }
+  }                                         // set end position of the token to s
   if(eq)
     *eq = s;
 
-  while(s < es && strchr(whitespace, *s))
+  while(s < es && strchr(whitespace, *s))   // get to the next starting position
     s++;
-  *ps = s;
-  return ret;
+  *ps = s;                                  // update the start position
+  return ret;                               // return
 }
 
 int
@@ -329,9 +332,9 @@ struct cmd*
 parsecmd(char *s)
 {
   char *es;
-  struct cmd *cmd;
+  struct cmd *cmd;    // command tree
 
-  es = s + strlen(s);
+  es = s + strlen(s); // find the end of the string
   cmd = parseline(&s, es);
   peek(&s, es, "");
   if(s != es){
@@ -342,15 +345,20 @@ parsecmd(char *s)
   return cmd;
 }
 
+// recursive descent parser
+
 struct cmd*
 parseline(char **ps, char *es)
 {
+
+  // <line> ::= <pipe> {&} [;<line>]
+
   struct cmd *cmd;
 
   cmd = parsepipe(ps, es);
   while(peek(ps, es, "&")){
     gettoken(ps, es, 0, 0);
-    cmd = backcmd(cmd);
+    cmd = backcmd(cmd);           // add the existing tree(cmd) to a new node(backcmd)
   }
   if(peek(ps, es, ";")){
     gettoken(ps, es, 0, 0);
@@ -365,9 +373,9 @@ parsepipe(char **ps, char *es)
   struct cmd *cmd;
 
   cmd = parseexec(ps, es);
-  if(peek(ps, es, "|")){
+  if(peek(ps, es, "|")){                      // <pipe> ::= <exec> if there's no '|'
     gettoken(ps, es, 0, 0);
-    cmd = pipecmd(cmd, parsepipe(ps, es));
+    cmd = pipecmd(cmd, parsepipe(ps, es));    // right recursive tree: <pipe> ::= <exec> | <pipe>
   }
   return cmd;
 }
@@ -375,6 +383,12 @@ parsepipe(char **ps, char *es)
 struct cmd*
 parseredirs(struct cmd *cmd, char **ps, char *es)
 {
+  /* 
+  <redir> ::= < <name>
+            | > <name>
+            | >> <name>
+  */
+
   int tok;
   char *q, *eq;
 
@@ -384,12 +398,12 @@ parseredirs(struct cmd *cmd, char **ps, char *es)
       panic("missing file for redirection");
     switch(tok){
     case '<':
-      cmd = redircmd(cmd, q, eq, O_RDONLY, 0);
+      cmd = redircmd(cmd, q, eq, O_RDONLY, 0);                    // close stdin
       break;
     case '>':
-      cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE|O_TRUNC, 1);
+      cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE|O_TRUNC, 1);   // close stdout
       break;
-    case '+':  // >>
+    case '+':  // >>                                              // append to the file
       cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE, 1);
       break;
     }
@@ -400,6 +414,9 @@ parseredirs(struct cmd *cmd, char **ps, char *es)
 struct cmd*
 parseblock(char **ps, char *es)
 {
+
+  // <block> ::= (<line>) <redir>
+
   struct cmd *cmd;
 
   if(!peek(ps, es, "("))
@@ -409,13 +426,17 @@ parseblock(char **ps, char *es)
   if(!peek(ps, es, ")"))
     panic("syntax - missing )");
   gettoken(ps, es, 0, 0);
-  cmd = parseredirs(cmd, ps, es);
+  cmd = parseredirs(cmd, ps, es);   // possibly add a new root to the tree
   return cmd;
 }
 
 struct cmd*
 parseexec(char **ps, char *es)
 {
+  /*
+      <exec> ::= <redir> {<name> <redir>}
+              |  <block>
+  */
   char *q, *eq;
   int tok, argc;
   struct execcmd *cmd;
@@ -430,13 +451,13 @@ parseexec(char **ps, char *es)
   argc = 0;
   ret = parseredirs(ret, ps, es);
   while(!peek(ps, es, "|)&;")){
-    if((tok=gettoken(ps, es, &q, &eq)) == 0)
+    if((tok=gettoken(ps, es, &q, &eq)) == 0) 
       break;
     if(tok != 'a')
       panic("syntax");
-    cmd->argv[argc] = q;
-    cmd->eargv[argc] = eq;
-    argc++;
+    cmd->argv[argc] = q;    // argv[argc] points to the beginning of the latest token <name>
+    cmd->eargv[argc] = eq;  // eargv[argc] points to the end of the last token <name> (one byte after)
+    argc++;                 // increment the count for next iteration
     if(argc >= MAXARGS)
       panic("too many args");
     ret = parseredirs(ret, ps, es);
