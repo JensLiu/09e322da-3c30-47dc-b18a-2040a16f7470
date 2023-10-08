@@ -125,6 +125,9 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  // initialise tracemask to 0
+  p->tracemask = 0;
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -320,6 +323,12 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+
+  // copy tracemask
+  // acquire(&p->lock);
+  np->tracemask = p->tracemask;
+  // release(&p->lock);
+
   release(&np->lock);
 
   return pid;
