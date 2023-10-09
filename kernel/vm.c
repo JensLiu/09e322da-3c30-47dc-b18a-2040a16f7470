@@ -17,7 +17,7 @@ extern char trampoline[]; // trampoline.S
 
 // Make a direct-map page table for the kernel.
 pagetable_t
-kvmmake(void)
+kvmmake(void) // identity mapping (va = pa)
 {
   pagetable_t kpgtbl;
 
@@ -83,20 +83,20 @@ kvminithart()
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
 pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
+walk(pagetable_t pagetable, uint64 va, int alloc)   // simulates the paging hardware's process in translating VA
 {
   if(va >= MAXVA)
     panic("walk");
 
-  for(int level = 2; level > 0; level--) {
-    pte_t *pte = &pagetable[PX(level, va)];
-    if(*pte & PTE_V) {
+  for(int level = 2; level > 0; level--) {  // starting from the top level (9 bits at a time)
+    pte_t *pte = &pagetable[PX(level, va)]; // current level page table entry
+    if(*pte & PTE_V) {                      // if entry valid, go to the next level's page table
       pagetable = (pagetable_t)PTE2PA(*pte);
-    } else {
-      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+    } else {                                // if not valid, allocate a new page table node and update current entry to valid
+      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)   // allocate a new node (size = 4096 Bytes)
         return 0;
-      memset(pagetable, 0, PGSIZE);
-      *pte = PA2PTE(pagetable) | PTE_V;
+      memset(pagetable, 0, PGSIZE);         // init
+      *pte = PA2PTE(pagetable) | PTE_V;     // update current entry to valid, and points to the newly allocated node
     }
   }
   return &pagetable[PX(0, va)];
@@ -447,5 +447,31 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+// vmprint
+void dovmprint(pagetable_t, int);
+
+void
+vmprint(pagetable_t pgtble)
+{
+  printf("page table %p\n", pgtble);
+  dovmprint(pgtble, 2);
+}
+
+void dovmprint(pagetable_t pgtble, int level)
+{
+  if (level < 0)
+    return;
+
+  char *levelstr[] = {".. .. ..", ".. ..", ".."};
+
+  pagetable_t pte = pgtble;
+  for (; pte - pgtble < 512; pte++) {
+    if (*pte & PTE_V) {
+      printf("%s%d: pte %p pa %p\n", levelstr[level], pte - pgtble, *pte, PTE2PA(*pte));
+      dovmprint((pagetable_t)PTE2PA(*pte), level - 1); // PTE2PA(*pte) := (*pte >> 10) << 12. find its child
+    }
   }
 }
