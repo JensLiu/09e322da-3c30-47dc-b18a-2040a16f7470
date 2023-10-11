@@ -133,3 +133,14 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+void
+backtrace(void) // use parentheses in macro decleration! 
+{
+  uint64 fp = r_fp(), kstack_page = PGROUNDDOWN(fp);
+  while(FP_PREVFRAME(fp) >= kstack_page) {  // do not print the ret addr of the last frame
+    printf("%p\n", FP_RETADDR(fp));
+    fp = FP_PREVFRAME(fp);
+  }
+  return;
+}

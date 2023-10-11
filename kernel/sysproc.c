@@ -6,6 +6,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern void backtrace(void);
+
 uint64
 sys_exit(void)
 {
@@ -53,7 +55,7 @@ sys_sleep(void)
 {
   int n;
   uint ticks0;
-
+  backtrace();
   argint(0, &n);
   if(n < 0)
     n = 0;

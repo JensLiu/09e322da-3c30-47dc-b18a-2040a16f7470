@@ -327,6 +327,27 @@ sfence_vma()
   asm volatile("sfence.vma zero, zero");
 }
 
+// frame pointer
+static inline uint64
+r_fp()
+{
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r" (x));
+  return x;
+}
+
+// STACK FRAME
+// fp ->
+//          return address
+// fp-8 ->
+//          prev fp
+// fp-16 ->
+#define FP_PREVFRAME_PTR(x) (x - 16)
+#define FP_RETADDR_PTR(x) (x - 8)
+#define FP_PREVFRAME(x) (*(uint64 *)FP_PREVFRAME_PTR(x))
+#define FP_RETADDR(x) (*(uint64 *)FP_RETADDR_PTR(x))
+
+
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
 
