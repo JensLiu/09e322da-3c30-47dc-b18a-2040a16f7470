@@ -102,6 +102,36 @@ allocpid()
   return pid;
 }
 
+// init sig alarm frame
+void
+init_sig_alarm_frame(struct proc *p)
+{
+  p->sig_alarm_frame.in_handler = 0;
+  p->sig_alarm_frame.handler = 0;
+  p->sig_alarm_frame.interval = 0;
+  p->sig_alarm_frame.ticks = 0;
+  p->sig_alarm_frame.ra = 0;
+  p->sig_alarm_frame.t0 = 0;
+  p->sig_alarm_frame.t1 = 0;
+  p->sig_alarm_frame.t2 = 0;
+  p->sig_alarm_frame.t3 = 0;
+  p->sig_alarm_frame.t4 = 0;
+  p->sig_alarm_frame.t5 = 0;
+  p->sig_alarm_frame.t6 = 0;
+  p->sig_alarm_frame.a0 = 0;
+  p->sig_alarm_frame.a1 = 0;
+  p->sig_alarm_frame.a2 = 0;
+  p->sig_alarm_frame.a3 = 0;
+  p->sig_alarm_frame.a4 = 0;
+  p->sig_alarm_frame.a5 = 0;
+  p->sig_alarm_frame.a6 = 0;
+  p->sig_alarm_frame.a7 = 0;
+  p->sig_alarm_frame.sp = 0;
+  p->sig_alarm_frame.s0 = 0;
+  p->sig_alarm_frame.epc = 0;
+}
+
+
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -124,6 +154,9 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+
+  // init sig alarm
+  init_sig_alarm_frame(p);
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){

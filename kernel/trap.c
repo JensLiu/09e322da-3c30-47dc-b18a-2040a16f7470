@@ -29,6 +29,50 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+void
+handle_sigalarm(struct proc *p)
+{
+  if (p->sig_alarm_frame.interval > 0) {  // if sigalarm enabled
+    p->sig_alarm_frame.ticks++;           // increase ticks
+    if (!(p->sig_alarm_frame.in_handler)                                  // thread not in handler
+          && p->sig_alarm_frame.ticks >= p->sig_alarm_frame.interval) {   // timer expires
+
+      p->sig_alarm_frame.in_handler = 1;                                  // enable handler
+      p->sig_alarm_frame.ticks = 0;                                       // reset counter
+
+      // save execution position
+      p->sig_alarm_frame.epc = p->trapframe->epc;
+      
+      // no need to construct stack frame since the compiler
+      // will do it in the called function
+      
+      p->sig_alarm_frame.sp = p->trapframe->sp;
+      p->sig_alarm_frame.s0 = p->trapframe->s0;
+
+      // caller saved registers
+      p->sig_alarm_frame.ra = p->trapframe->ra;
+      p->sig_alarm_frame.t0 = p->trapframe->t0;
+      p->sig_alarm_frame.t1 = p->trapframe->t1;
+      p->sig_alarm_frame.t2 = p->trapframe->t2;
+      p->sig_alarm_frame.t3 = p->trapframe->t3;
+      p->sig_alarm_frame.t4 = p->trapframe->t4;
+      p->sig_alarm_frame.t5 = p->trapframe->t5;
+      p->sig_alarm_frame.t6 = p->trapframe->t6;
+      p->sig_alarm_frame.a0 = p->trapframe->a0;
+      p->sig_alarm_frame.a1 = p->trapframe->a1;
+      p->sig_alarm_frame.a2 = p->trapframe->a2;
+      p->sig_alarm_frame.a3 = p->trapframe->a3;
+      p->sig_alarm_frame.a4 = p->trapframe->a4;
+      p->sig_alarm_frame.a5 = p->trapframe->a5;
+      p->sig_alarm_frame.a6 = p->trapframe->a6;
+      p->sig_alarm_frame.a7 = p->trapframe->a7;
+
+      // switch pc to the handler position 
+      p->trapframe->epc = p->sig_alarm_frame.handler;
+    }
+  }
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -65,9 +109,9 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if((which_dev = devintr()) != 0){  // interupt off since it only reenables it in system call
     // ok
-  } else {
+  } else {                                  // interput off
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);
@@ -77,9 +121,11 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    handle_sigalarm(p);
     yield();
-
+  }
+    
   usertrapret();
 }
 
