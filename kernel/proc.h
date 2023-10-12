@@ -107,4 +107,6 @@ struct proc {
 
   // usyscall structure
   struct usyscall *pusyscall;
+  // kernel page table
+  pagetable_t kpagetable;
 };

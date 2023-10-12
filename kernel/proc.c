@@ -102,6 +102,7 @@ allocpid()
   return pid;
 }
 
+extern pagetable_t kpgtbl_copy_shallow(void);
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -143,6 +144,14 @@ found:
   // question: redundancy and consistancy
   p->pusyscall->pid = p->pid;
 
+  // mapped kernel page table
+  p->kpagetable = kpgtbl_copy_shallow();
+  if (p->kpagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -160,6 +169,7 @@ found:
   return p;
 }
 
+extern void proc_freekpagetable(pagetable_t);
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -172,6 +182,9 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  if (p->kpagetable)
+    proc_freekpagetable(p->kpagetable);
+  p->kpagetable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -232,6 +245,34 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmunmap(pagetable, USYSCALL, 1, 0);  // important, otherwise freewalk will panic (since there is an unfreeed page)
   uvmfree(pagetable, sz);
+}
+
+void do_proc_freekpagetable(pagetable_t kpgtblnode, int level)
+{
+  // printf("free: %p, %d\n", kpgtblnode, level);
+  if (level < 1)  // only need to free the top 2 levels
+    return;
+  // free child node
+  pte_t *pte = kpgtblnode;
+  for (; pte - kpgtblnode < 512; pte++) {
+    if (PTE_V & *pte) {
+      do_proc_freekpagetable((pagetable_t)PTE2PA(*pte), level - 1);
+    }
+  }
+  // free itself
+  kfree(kpgtblnode);
+}
+
+extern pagetable_t kernel_pagetable;
+extern void kpgtbl_free_shallow(pagetable_t);
+
+void proc_freekpagetable(pagetable_t kpgtblroot)
+{
+  sfence_vma();
+  w_satp(MAKE_SATP(kernel_pagetable));
+  sfence_vma();
+  // do_proc_freekpagetable(kpgtblroot, 2);
+  kpgtbl_free_shallow(kpgtblroot);
 }
 
 // a user program that calls exec("/init")
@@ -453,6 +494,8 @@ wait(uint64 addr)
   }
 }
 
+extern pagetable_t kernel_pagetable;
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -472,22 +515,37 @@ scheduler(void)
     // turned off; enable them to avoid a deadlock if all
     // processes are waiting.
     intr_on();
-
+    int has_proc_running = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
+        has_proc_running = 1;
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // load precess' kernel page table
+        sfence_vma();
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
+
+        // switch to the kernel thread of that process
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
+
+        sfence_vma();
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
       }
       release(&p->lock);
+    }
+    if (!has_proc_running) {  // if no process is running, use the kernel page
+
     }
   }
 }

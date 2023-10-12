@@ -49,6 +49,83 @@ kvmmake(void) // identity mapping (va = pa)
   return kpgtbl;
 }
 
+// copy the page table (not used since it costs lots of memory)
+void
+do_copy_pagetable(pagetable_t from, pagetable_t to, int level)
+{
+  if (level < 0)
+    return;
+
+  if (level == 0) {
+    for (int i = 0; i < 512; i++) {
+      to[i] = from[i];
+    }
+    return;
+  }
+  
+  if (level > 0) {
+    for (int i = 0; i < 512; i++) {
+      if (!(PTE_V & from[i]))
+        continue;
+      void *pgtbl = kalloc();
+      memset(pgtbl, 0, PGSIZE); // otherwise unwanted entries (since valid bit may not be zero)
+      to[i] = (PTE_FLAGS(from[i]) | PA2PTE((uint64)pgtbl));
+      do_copy_pagetable((pagetable_t)PTE2PA(from[i]), (pagetable_t)PTE2PA(to[i]), level - 1);
+    }
+    return;
+  }
+
+}
+
+pagetable_t
+kpgtbl_copy(void) // for every process to have a new copy of the kernel's page table (full mapping) is too costy!
+{
+  pagetable_t pgtbl = kalloc();
+  memset(pgtbl, 0, PGSIZE);   // otherwise unwanted entries (since valid bit may not be zero)
+  do_copy_pagetable(kernel_pagetable, pgtbl, 2);
+  return pgtbl;
+}
+
+pagetable_t
+kpgtbl_copy_shallow(void)
+{
+  pagetable_t pgtbl = kalloc();
+
+  // 1G and up cannot be changed by user programme, shared to save space
+  memset(pgtbl, 0, PGSIZE);
+  for (int i = 1; i < 512; i++) {
+    pgtbl[i] = kernel_pagetable[i];
+  }
+
+  // map addresses below KERNALBASE 0x80000000 (at entry 2: 0x80000000 >> (12 + 9 + 9) = 0x2)
+  // user pages are no more than 1G, thus cannot exceed KERNELBASE
+  kvmmap(pgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  kvmmap(pgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  kvmmap(pgtbl, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  kvmmap(pgtbl, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  return pgtbl;
+}
+
+void
+kpgtbl_free_shallow(pagetable_t pgtbl)
+{
+  // only need to free the buttom 1G: entry 0 at level2
+  // need not to reclaim actual physical memory
+  // -> only free level 2 page tables
+  pagetable_t level1_pgtbl = (pagetable_t)PTE2PA(pgtbl[0]);
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = level1_pgtbl[i];
+    if (pte & PTE_V) {
+      pagetable_t level0_node = (pagetable_t)PTE2PA(pte);
+      kfree((void *)level0_node);
+      level1_pgtbl[i] = 0;
+    }
+  }
+  kfree((void *)level1_pgtbl);
+  kfree((void *)pgtbl);
+}
+
 // Initialize the one kernel_pagetable
 void
 kvminit(void)
@@ -467,10 +544,10 @@ void dovmprint(pagetable_t pgtble, int level)
 
   char *levelstr[] = {".. .. ..", ".. ..", ".."};
 
-  pagetable_t pte = pgtble;
+  pte_t *pte = pgtble;
   for (; pte - pgtble < 512; pte++) {
     if (*pte & PTE_V) {
-      printf("%s%d: pte %p pa %p\n", levelstr[level], pte - pgtble, *pte, PTE2PA(*pte));
+      printf("%s%d: pte %p pa %p fl %p \n", levelstr[level], pte - pgtble, *pte, PTE2PA(*pte), PTE_FLAGS(*pte));
       dovmprint((pagetable_t)PTE2PA(*pte), level - 1); // PTE2PA(*pte) := (*pte >> 10) << 12. find its child
     }
   }
