@@ -30,7 +30,7 @@ exec(char *path, char **argv)
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
-  pagetable_t pagetable = 0, oldpagetable, kpagetable;
+  pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
 
   begin_op();
@@ -49,9 +49,6 @@ exec(char *path, char **argv)
     goto bad;
 
   if((pagetable = proc_pagetable(p)) == 0)  // create a page table without user mapping (has trampoline and trapframe at the top)
-    goto bad;
-
-  if ((kpagetable = kpgtbl_copy_shallow()) == 0)
     goto bad;
 
   // Load program into memory.
@@ -138,6 +135,7 @@ exec(char *path, char **argv)
 
   // copy the readily made user page table to the kernel page table
   kparallelmap(p->kpagetable, p->pagetable, 0, p->sz);
+  
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

@@ -570,7 +570,7 @@ void dovmprint(pagetable_t pgtble, int level)
   pte_t *pte = pgtble;
   for (; pte - pgtble < 512; pte++) {
     if (*pte & PTE_V) {
-      printf("%s%d: pte %p pa %p fl %p \n", levelstr[level], pte - pgtble, *pte, PTE2PA(*pte), PTE_FLAGS(*pte));
+      printf("%s%d: pte %p pa %p\n", levelstr[level], pte - pgtble, *pte, PTE2PA(*pte));
       dovmprint((pagetable_t)PTE2PA(*pte), level - 1); // PTE2PA(*pte) := (*pte >> 10) << 12. find its child
     }
   }
