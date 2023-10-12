@@ -248,6 +248,28 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
+int
+kparallelmap(pagetable_t kpgtbl, pagetable_t upgtbl, uint64 oldsz, uint64 newsz)
+{
+  pte_t *upte, *kpte;
+  for(uint64 a = oldsz; a < newsz; a += PGSIZE) {  // for the grown size
+    
+    upte = walk(upgtbl, a, 0);
+
+    if (!(*upte & PTE_V))
+      panic("kparallelmap: PTE invalid");
+
+    kpte = walk(kpgtbl, a, 1);      // allocate intermediate page tables
+    
+    if (!(*upte & PTE_V))
+      panic("kparallelmap: PTE invalid");
+    
+    (*kpte) = (*upte);
+    *kpte &= ~PTE_U;                // cannot access PTE_U in kernel mode
+  }
+  return 0;
+}
+
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
@@ -469,10 +491,10 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
+    pa0 = walkaddr(pagetable, va0); // page aligned physical address
     if(pa0 == 0)
       return -1;
-    n = PGSIZE - (srcva - va0);
+    n = PGSIZE - (srcva - va0); // copy the remaining part of the page(since address goes up)
     if(n > len)
       n = len;
     memmove(dst, (void *)(pa0 + (srcva - va0)), n);
@@ -483,6 +505,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   }
   return 0;
 }
+
 
 // Copy a null-terminated string from user to kernel.
 // Copy bytes to dst from virtual address srcva in a given page table,

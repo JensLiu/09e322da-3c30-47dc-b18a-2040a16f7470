@@ -20,6 +20,9 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern pagetable_t kpgtbl_copy_shallow(void);
+extern int kparallelmap(pagetable_t, pagetable_t, uint64, uint64);
+
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
 // memory model when using p->parent.
@@ -102,7 +105,6 @@ allocpid()
   return pid;
 }
 
-extern pagetable_t kpgtbl_copy_shallow(void);
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -300,6 +302,8 @@ userinit(void)
   // allocate one user page and copy initcode's instructions
   // and data into it.
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
+  // change per process kernel page table mapping
+  kparallelmap(p->kpagetable, p->pagetable, p->sz, PGSIZE);
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -330,6 +334,7 @@ growproc(int n)
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
+  kparallelmap(p->kpagetable, p->pagetable, p->sz, sz);
   p->sz = sz;
   return 0;
 }
@@ -350,6 +355,14 @@ fork(void)
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+
+  // map the same addr into process' kernel space
+  // use np->pagetable to avoid the parent being killed before copy happens
+  if (kparallelmap(np->kpagetable, np->pagetable, 0, np->sz) < 0) {
     freeproc(np);
     release(&np->lock);
     return -1;

@@ -38,12 +38,12 @@ memmove(void *dst, const void *src, uint n)
   
   s = src;
   d = dst;
-  if(s < d && s + n > d){
+  if(s < d && s + n > d){ // copy backwards so that it will not overwrite the overlapsed part
     s += n;
     d += n;
     while(n-- > 0)
       *--d = *--s;
-  } else
+  } else                // copy forwards s >= d or s+n <= d does not overlapse
     while(n-- > 0)
       *d++ = *s++;
 
