@@ -63,6 +63,10 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+int             inc_phymem_ref(uint64);
+int             dec_phymem_ref(uint64);
+int             get_phymem_ref_cnt(uint64);
+
 
 // log.c
 void            initlog(int, struct superblock*);

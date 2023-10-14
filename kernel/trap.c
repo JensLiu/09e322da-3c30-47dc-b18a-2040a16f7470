@@ -15,6 +15,7 @@ extern char trampoline[], uservec[], userret[];
 void kernelvec();
 
 extern int devintr();
+extern int cow_update_pgtbl(pagetable_t, uint64);
 
 void
 trapinit(void)
@@ -27,6 +28,32 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+void
+handle_store_pagefault(struct proc *p)
+{
+  uint64 pa = r_stval();
+  pte_t *pte = walk(p->pagetable, pa, 0);
+  
+  if (pte == 0) {
+    printf("usertrap: invalid PTE\n");
+    setkilled(p);
+    return;
+  }
+
+  if ((*pte & PTE_COW) == 0) {
+    printf("usertrap(): page fault %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    setkilled(p);
+    return;
+  }
+  // cow page fault
+  if (cow_update_pgtbl(p->pagetable, r_stval()) < 0) {
+    printf("handle_store_pagefault: error\n");
+    setkilled(p);
+  }
+
 }
 
 //
@@ -67,6 +94,8 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 15) {
+    handle_store_pagefault(p);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

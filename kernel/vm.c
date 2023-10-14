@@ -85,8 +85,12 @@ kvminithart()
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
-  if(va >= MAXVA)
-    panic("walk");
+  // NOTE: do not panic, there are test cases where va exceeds the limit
+  //       just return null and the calling function will handle accordingly
+  if(va >= MAXVA) {
+    printf("walk: exceeds max address\n");
+    return 0;
+  }
 
   for(int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
@@ -131,6 +135,8 @@ walkaddr(pagetable_t pagetable, uint64 va)
 void
 kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
+  // NOTE: since we are not modifying mappages to increment refcnt, we do not need to deal with kernel mapping
+  //       (we modify refcnt in user mapping) 
   if(mappages(kpgtbl, va, sz, pa, perm) != 0)
     panic("kvmmap");
 }
@@ -192,6 +198,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not a leaf");
     if(do_free){
       uint64 pa = PTE2PA(*pte);
+      // NOTE: since it calls kfree, no need to modify it (kfree decreases refcnt)
       kfree((void*)pa);
     }
     *pte = 0;
@@ -240,6 +247,8 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 
   oldsz = PGROUNDUP(oldsz);
   for(a = oldsz; a < newsz; a += PGSIZE){
+    // NOTE: since it calls kalloc, refcnt = 1, meaning that it is referenced to a pagetable
+    //       uses mappages, it does not change the refcnt
     mem = kalloc();
     if(mem == 0){
       uvmdealloc(pagetable, a, oldsz);
@@ -267,6 +276,8 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
   if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
     int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+
+    // NOTE: since it calles uvmunmap, it decrements the refcnt
     uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
   }
 
@@ -315,7 +326,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -323,20 +333,80 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+
+    if (*pte & PTE_W) {             // important to distinguish those having PTE_W set and those don't
+      *pte &= ~PTE_W;               // set read only and cow bit
+      *pte |= PTE_COW;
     }
+    flags = PTE_FLAGS(*pte);
+    
+    // NOTE: do not modify mappages, since it will be called by kvmmap to map addresses by kernels
+    //       allowing mappages to increment refcnt will overly complicate the problem since we need
+    //       cancel the side effect by kernel mapping and allocation
+    inc_phymem_ref(pa);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
   }
   return 0;
 
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+int
+cow_update_pgtbl(pagetable_t pgtbl, uint64 va)
+{
+
+  pte_t *pte = walk(pgtbl, va, 0);
+
+  // check illegal memory access
+  if (pte == 0) {
+    printf("cow_update_pgtbl: PTE invalid\n");
+    return -1;
+  }
+
+  // NOTE: important to check if it satisfy the requirements for COW page
+  //       there are cases where COW is present but other bits are missing
+  if ((*pte & PTE_COW) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_V) == 0) {
+    printf("invalid COW entry -> COW: %d USER: %d VALID: %d\n", (*pte & PTE_COW) == 0, (*pte & PTE_U) == 0, (*pte & PTE_V) == 0);
+    return -1;
+  }
+
+  int refcnt = get_phymem_ref_cnt((uint64) PTE2PA(*pte));
+
+  if (refcnt > 1) {
+    // allocate a new page for the physical memory and copy from original
+    void *mem = (void *)kalloc();
+    if (mem == 0) {
+      printf("cow_update_pgtbl: out of memory\n");
+      return -1;
+    }
+
+    void *pa = (void *)PTE2PA(*pte);
+
+    // copy memory
+    memmove(mem, pa, PGSIZE);
+
+    *pte = PA2PTE(mem) | PTE_FLAGS(*pte);
+    *pte &= ~PTE_COW;       // remove COW flag
+    *pte |= PTE_W;          // restore writable bit
+    
+    kfree((void *) pa);     // dereference to old page
+
+    return 0;
+  } else if (refcnt == 1) {
+    // only one reference, maybe the child/parent is released
+    // at this time we do not need to allocate new page
+    pte_t *pte = walk(pgtbl, va, 0);
+    *pte &= ~PTE_COW;
+    *pte |= PTE_W;
+    return 0;
+  } else {
+    printf("cow_update_pgtbl: error, refcnt=%d\n", refcnt);
+    return -1;
+  }
+
 }
 
 // mark a PTE invalid for user access.
@@ -366,13 +436,19 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     if(va0 >= MAXVA)
       return -1;
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
+    // check for write bit, designate it to cow handler
+    if ((*pte & PTE_W) == 0) {
+      if (cow_update_pgtbl(pagetable, va0) < 0)
+        return -1;
+    }
     pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
+    // this directly work with PA, so no check for PTE_W by hardware! (kernel pagetable)
+    // it does not use the MMU
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
