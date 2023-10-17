@@ -30,6 +30,23 @@ barrier()
   // Block until all threads have called barrier() and
   // then increment bstate.round.
   //
+  pthread_mutex_lock(&bstate.barrier_mutex);
+  
+  bstate.nthread++;
+
+  int current_round = bstate.round;
+
+  while (bstate.nthread != nthread && current_round == bstate.round) {
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+  
+  if (bstate.nthread == nthread && current_round == bstate.round) {
+    // only the last thread is able to modify it
+    bstate.nthread = 0;
+    bstate.round++;
+    pthread_cond_broadcast(&bstate.barrier_cond);
+  }
+  pthread_mutex_unlock(&bstate.barrier_mutex);
   
 }
 
