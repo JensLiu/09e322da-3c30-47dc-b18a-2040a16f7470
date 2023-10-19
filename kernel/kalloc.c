@@ -10,6 +10,7 @@
 #include "defs.h"
 
 void freerange(void *pa_start, void *pa_end);
+struct run *alloc_steal(int);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
@@ -21,12 +22,14 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmems[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for (int i = 0; i < NCPU; i++) 
+    initlock(&kmems[i].lock, "kmem_per_cpu");
+    
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -55,11 +58,19 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  
+  push_off();
+  // should not be interupted
+  // otherwise timer interput may switch this
+  // kernel thread to another CPU after the cpuid
+  // is read and before actually acquired the lock
+  // for that CPU
+  int current_cpu = cpuid();
+  acquire(&kmems[current_cpu].lock);
+  r->next = kmems[current_cpu].freelist;
+  kmems[current_cpu].freelist = r;
+  release(&kmems[current_cpu].lock);
+  pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -70,13 +81,34 @@ kalloc(void)
 {
   struct run *r;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  push_off();
+  int current_cpu = cpuid();
+  
+  for (int i = current_cpu; i < current_cpu + NCPU; i++) {
+    r = alloc_steal(i % NCPU);  // first look at its own free list
+    if (r)
+      break;
+  }
+
+  pop_off();
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+struct run *
+alloc_steal(int cpuid)
+{
+  acquire(&kmems[cpuid].lock);
+  struct run *r = kmems[cpuid].freelist;
+  
+  // does not have free memory
+  if (r)
+    kmems[cpuid].freelist = r->next;
+  
+  release(&kmems[cpuid].lock);
+
+  return r;
+
 }
