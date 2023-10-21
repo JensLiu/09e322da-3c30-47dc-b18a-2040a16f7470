@@ -23,14 +23,27 @@
 #include "fs.h"
 #include "buf.h"
 
+
+inline struct bucket *get_bucket(struct buf *);
+void check_linked_list(struct buf *);
+void insert_after(struct buf *, struct buf *);
+void remove(struct buf *);
+
+// #define DEBUG_VERBOSE
+// #define DEBUG_GUARD
+
+#define NBUCKET 13
+#define BHASH(dev, blockno) ((dev + blockno) % NBUCKET)
+
+struct bucket {
+  struct spinlock blk;
+  struct buf head;
+};
+
 struct {
   struct spinlock lock;
-  struct buf buf[NBUF];
-
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+  struct buf buf[NBUF];           // it is prohibited to access any buffer by buf
+  struct bucket htable[NBUCKET];  // hash table: all access to buffers should be made using this table
 } bcache;
 
 void
@@ -40,16 +53,26 @@ binit(void)
 
   initlock(&bcache.lock, "bcache");
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+  // initialise hash table
+  for (int i = 0; i < NBUCKET; i++) {
+    initlock(&bcache.htable[i].blk, "bcache.bucket");
+    // initialise hash table chain
+    bcache.htable[i].head.next = &bcache.htable[i].head;
+    bcache.htable[i].head.prev = &bcache.htable[i].head;
   }
+  
+  // initialise buffers to the first entry
+  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
+    initsleeplock(&b->lock, "buffer");
+    insert_after(&bcache.htable[0].head, b);
+  }
+
+#ifdef DEBUG_GUARD
+  for (int i = 0; i < NBUCKET; i++) {
+    check_linked_list(&bcache.htable[i].head);
+  }
+#endif
+
 }
 
 // Look through buffer cache for block on device dev.
@@ -59,33 +82,91 @@ static struct buf*
 bget(uint dev, uint blockno)
 {
   struct buf *b;
+  struct bucket *curbuk;
+  int hidx;
 
-  acquire(&bcache.lock);
+  hidx = BHASH(dev, blockno);
+  curbuk = &bcache.htable[hidx];
+
+  acquire(&curbuk->blk);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = curbuk->head.next; b != &curbuk->head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      b->timestamp = ticks;   // timestamp does not need to be accurate, no need to hold a lock
+      release(&curbuk->blk);
+#ifdef DEBUG_VERBOSE
+      printf("hit in bucket %d\n", hidx);
+      printf("hit:\t\t %p cnt=%d, blockno=%d\n", b, b->refcnt, b->blockno);
+#endif
       acquiresleep(&b->lock);
       return b;
     }
   }
+  release(&curbuk->blk);
 
   // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  // serialise the finding of free buffers to avoid multiple thread asking for the same dev and blockno
+  // and allocated multiple buffers for the same dev and blockno
+  acquire(&bcache.lock);
+  struct bucket *buk_found = 0;
+  struct buf *buf_found = 0;
+
+  uint64 least_ts = __UINT64_MAX__;
+  int found_local_best = 0;
+
+  for(int i = 0; i < NBUCKET; i++){
+    acquire(&bcache.htable[i].blk); // freeze the bucket for check
+
+    struct buf *head = &bcache.htable[i].head;
+    for (b = head->prev; b != head; b = b->prev) {
+      // we uses local LRU scheme. search backwards means increasing timestamp value
+      if(b->refcnt == 0 && b->timestamp < least_ts) {
+        found_local_best = 1;
+        if (buk_found)
+          release(&buk_found->blk);
+        buk_found = &bcache.htable[i];
+        buf_found = b;
+        least_ts = b->timestamp;
+      }
+      if (b->timestamp > least_ts)  // break if found more recent one since they are ordered by their ts values
+        break;
     }
+
+    if (found_local_best)
+      found_local_best = 0; // hold the lock for the currently found LRU bucket
+    else
+      release(&bcache.htable[i].blk);
   }
-  panic("bget: no buffers");
+  
+  if (buf_found->refcnt > 0)
+    panic("bget: no buffers");
+
+  if (buk_found != curbuk) {
+    remove(buf_found);            // remove from original bucket
+    release(&buk_found->blk);     // resume the original bucket
+  }
+
+  buf_found->refcnt = 1;
+  buf_found->dev = dev;
+  buf_found->blockno = blockno;
+  buf_found->valid = 0;
+
+  if (buk_found != curbuk) {
+    acquire(&curbuk->blk);
+    insert_after(&curbuk->head, buf_found); // add to the current bucket
+  }
+  release(&curbuk->blk);  // done allocating, resume current bucket
+  release(&bcache.lock);  // done finding, let other threads to find free buffers
+#ifdef DEBUG_VERBOSE
+  printf("found buffer in bucket %d\n", i);
+  printf("allocated:\t %p cnt=%d, blockno=%d\n", buf_found, buf_found->refcnt, buf_found->blockno);
+#endif
+  // the buffer is sure not to be freeed since its refcnt >= 1
+  // (the current thread have not called brelse yet, so it is at least 1)
+  acquiresleep(&buf_found->lock);
+  return buf_found;
 }
 
 // Return a locked buf with the contents of the indicated block.
@@ -120,34 +201,100 @@ brelse(struct buf *b)
     panic("brelse");
 
   releasesleep(&b->lock);
-
-  acquire(&bcache.lock);
+  struct bucket *buk = get_bucket(b);
+  acquire(&buk->blk);
   b->refcnt--;
+  b->timestamp = ticks;
+#ifdef DEBUG_VERBOSE
+  printf("released:\t %p cnt=%d, blockno=%d\n", b, b->refcnt, b->blockno);
+#endif
   if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    remove(b);
+    insert_after(&buk->head, b);
   }
-  
-  release(&bcache.lock);
+  release(&buk->blk);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  struct bucket *buk = get_bucket(b);
+  acquire(&buk->blk);
   b->refcnt++;
-  release(&bcache.lock);
+#ifdef DEBUG_VERBOSE
+  printf("bpin:\t\t %p cnt=%d, blockno=%d\n", b, b->refcnt, b->blockno);
+#endif
+  release(&buk->blk);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  struct bucket *buk = get_bucket(b);
+  acquire(&buk->blk);
   b->refcnt--;
-  release(&bcache.lock);
+#ifdef DEBUG_VERBOSE
+  printf("bpin:\t\t %p cnt=%d, blockno=%d\n", b, b->refcnt, b->blockno);
+#endif
+  release(&buk->blk);
 }
 
+// helper functions
 
+inline struct bucket *
+get_bucket(struct buf *b)
+{
+  // Question: from looking at b to lock its parent bucket is not atomic,
+  //           will b->dev and b->blockno change during this period?
+  return &bcache.htable[BHASH(b->dev, b->blockno)];
+}
+
+// p should not be referenced by another linked list
+// the caller should hold lock of the list that contains at
+void
+insert_after(struct buf *at, struct buf *p)
+{
+  p->next = at->next;
+  p->prev = at;
+  at->next->prev = p;
+  at->next = p;
+#ifdef DEBUG_GUARD
+  check_linked_list(at);
+  check_linked_list(p);
+#endif
+}
+
+// remove p from its original list
+// the caller should hold lock of the list that contains p
+void
+remove(struct buf *p)
+{
+#ifdef DEBUG_GUARD
+  struct buf *p_next = p->next;
+#endif
+  if (!p->prev || !p->next)
+    panic("corrupted structure\n");
+  p->prev->next = p->next;
+  p->next->prev = p->prev;
+  p->next = 0;
+  p->prev = 0;
+#ifdef DEBUG_GUARD
+  check_linked_list(p_next);
+#endif
+}
+
+void
+check_linked_list(struct buf *head)
+{
+  struct buf *p;
+  int fcnt = 0, pcnt = 0;
+  for (p = head->next; p && p != head; p = p->next)
+    fcnt++;
+  if (p != head)
+    panic("corrupted linked list\n");
+  for (p = head->prev; p && p != head; p = p->prev)
+    pcnt++;
+  if (p != head)
+    panic("corrupted linked list\n");
+  if (pcnt != fcnt)
+    panic("corrupted linked list\n");
+  return;
+}
