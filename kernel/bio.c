@@ -75,43 +75,36 @@ binit(void)
 
 }
 
-// Look through buffer cache for block on device dev.
-// If not found, allocate a buffer.
-// In either case, return locked buffer.
+// the caller must hold the lock of the current block
 static struct buf*
-bget(uint dev, uint blockno)
+search_cache(uint dev, uint blockno)
 {
   struct buf *b;
   struct bucket *curbuk;
-  int hidx;
 
-  hidx = BHASH(dev, blockno);
-  curbuk = &bcache.htable[hidx];
-
-  acquire(&curbuk->blk);
+  curbuk = &bcache.htable[BHASH(dev, blockno)];
 
   // Is the block already cached?
   for(b = curbuk->head.next; b != &curbuk->head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
       b->timestamp = ticks;   // timestamp does not need to be accurate, no need to hold a lock
-      release(&curbuk->blk);
 #ifdef DEBUG_VERBOSE
       printf("hit in bucket %d\n", hidx);
       printf("hit:\t\t %p cnt=%d, blockno=%d\n", b, b->refcnt, b->blockno);
 #endif
-      acquiresleep(&b->lock);
       return b;
     }
   }
-  release(&curbuk->blk);
+  return 0;
+}
 
-  // Not cached.
-  // serialise the finding of free buffers to avoid multiple thread asking for the same dev and blockno
-  // and allocated multiple buffers for the same dev and blockno
-  acquire(&bcache.lock);
-  struct bucket *buk_found = 0;
-  struct buf *buf_found = 0;
+// the caller must acquire bcache.lock
+static struct buf*
+try_allocate(uint dev, uint blockno)
+{
+  struct buf *b = 0, *buf_found = 0;
+  struct bucket *buk_found = 0, *curbuk = &bcache.htable[BHASH(dev, blockno)];
 
   uint64 least_ts = __UINT64_MAX__;
   int found_local_best = 0;
@@ -140,8 +133,10 @@ bget(uint dev, uint blockno)
       release(&bcache.htable[i].blk);
   }
   
-  if (buf_found->refcnt > 0)
-    panic("bget: no buffers");
+  if (buf_found->refcnt > 0) {  // no buffer avaliable
+    release(&buk_found->blk);
+    return 0;
+  }
 
   if (buk_found != curbuk) {
     remove(buf_found);            // remove from original bucket
@@ -158,15 +153,49 @@ bget(uint dev, uint blockno)
     insert_after(&curbuk->head, buf_found); // add to the current bucket
   }
   release(&curbuk->blk);  // done allocating, resume current bucket
-  release(&bcache.lock);  // done finding, let other threads to find free buffers
+  return buf_found;
 #ifdef DEBUG_VERBOSE
   printf("found buffer in bucket %d\n", i);
   printf("allocated:\t %p cnt=%d, blockno=%d\n", buf_found, buf_found->refcnt, buf_found->blockno);
 #endif
-  // the buffer is sure not to be freeed since its refcnt >= 1
-  // (the current thread have not called brelse yet, so it is at least 1)
-  acquiresleep(&buf_found->lock);
-  return buf_found;
+
+}
+
+// Look through buffer cache for block on device dev.
+// If not found, allocate a buffer.
+// In either case, return locked buffer.
+static struct buf*
+bget(uint dev, uint blockno)
+{
+  struct buf *buf_found = 0;
+  struct bucket *curbuk = &bcache.htable[BHASH(dev, blockno)];
+
+  acquire(&curbuk->blk);
+  buf_found = search_cache(dev, blockno);
+  if (buf_found) {
+    release(&curbuk->blk);
+    acquiresleep(&buf_found->lock);
+    return buf_found;
+  }
+  release(&curbuk->blk);
+
+
+  // Not cached.
+  // serialise the finding of free buffers to avoid multiple thread asking for the same dev and blockno
+  // and allocated multiple buffers for the same dev and blockno
+  acquire(&bcache.lock);
+  buf_found = try_allocate(dev, blockno);
+  if (buf_found) {
+    release(&bcache.lock);  // done finding, let other threads to find free buffers
+    // the buffer is sure not to be freeed since its refcnt >= 1
+    // (the current thread have not called brelse yet, so it is at least 1)
+    acquiresleep(&buf_found->lock);
+    return buf_found;
+  }
+
+  panic("bget: no buffer");
+
+
 }
 
 // Return a locked buf with the contents of the indicated block.
