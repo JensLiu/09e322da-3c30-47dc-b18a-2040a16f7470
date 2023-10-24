@@ -212,6 +212,10 @@ sys_unlink(void)
     goto bad;
   ilock(ip);
 
+  if (ip->type == T_SYMLINK) {
+    itrunc(ip);
+  }
+  
   if(ip->nlink < 1)
     panic("unlink: nlink < 1");
   if(ip->type == T_DIR && !isdirempty(ip)){
@@ -233,7 +237,6 @@ sys_unlink(void)
   iunlockput(ip);
 
   end_op();
-
   return 0;
 
 bad:
@@ -335,13 +338,42 @@ sys_open(void)
     }
   }
 
+  if (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+    // open the symbolicly linked file
+    char path[MAXPATH];
+    struct inode *p = ip;
+    for (int depth = 0; depth < 10 ; depth++) {
+      if (readi(p, 0, (uint64)path, 0, MAXPATH) == 0) {
+        iunlockput(p);
+        end_op();
+        return -1;
+      }
+      iunlockput(p);
+      p = namei(path);
+      if (!p) {
+        end_op();
+        return -1;
+      }
+      ilock(p);
+      if (p->type != T_SYMLINK) {
+        break;
+      }
+    }
+    if (p->type == T_SYMLINK) {
+      iunlockput(p);
+      end_op();
+      return -1;
+    }
+    ip = p;
+  }
+
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+    if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
     iunlockput(ip);
@@ -366,7 +398,7 @@ sys_open(void)
 
   iunlock(ip);
   end_op();
-
+  
   return fd;
 }
 
@@ -501,5 +533,48 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  // link path -> target
+
+  char target[MAXPATH], path[MAXPATH], name[DIRSIZ];
+  struct inode *dp;
+  argstr(0, target, MAXPATH);
+  argstr(1, path, MAXPATH);
+
+  begin_op();
+
+  dp = nameiparent(path, name);
+  if (dp == 0) {
+    return -1;
+  }
+  ilock(dp);
+  struct inode *ip = dirlookup(dp, name, 0);
+  if (ip) {
+    iput(ip);   // it has content, allocated an inode!! release it otherwise inode leak
+    iunlockput(dp);
+    end_op();
+    return -1;
+  }
+
+  // allocate a node for symbolic link inode
+  ip = ialloc(dp->dev, T_SYMLINK);
+  ilock(ip);
+  ip->nlink = 1;    // otherwise will be cleaned by iput();
+  writei(ip, 0, (uint64)target, 0, MAXPATH);
+  
+  iupdate(ip);
+  // update the parent directory entry
+  dirlink(dp, name, ip->inum);
+  iunlockput(ip);
+
+  iupdate(dp);
+  iunlockput(dp);
+
+  end_op();
   return 0;
 }

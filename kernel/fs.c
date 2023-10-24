@@ -178,6 +178,20 @@ struct {
   struct inode inode[NINODE];
 } itable;
 
+// to debug inode leak
+int
+inodecount()
+{
+  acquire(&itable.lock);
+  int cnt = 0;
+  for (int i = 0; i < NINODE; i++) {
+    if (itable.inode[i].type != 0)
+      cnt++;
+  }
+  release(&itable.lock);
+  return cnt;
+}
+
 void
 iinit()
 {
