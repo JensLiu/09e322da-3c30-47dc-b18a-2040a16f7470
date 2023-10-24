@@ -417,6 +417,57 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  bn -= NINDIRECT; 
+  // now bn is the index local to the doubly indirect block
+  // to get its global logical index, use bn + DBLBASEIDX := bn + NINDIRECT + NDIRECT
+  
+  // doubly indirect block
+  if (bn < NDBLINDIRECT) {
+    // printf("->accessing block no %d\n", bn + DBLBASEIDX);
+    // printf("using doubly indirect block\n");
+    // load level 1 block, allocating if necessary
+    uint lvl1_addr = ip->addrs[NDIRECT + 1];
+    if (lvl1_addr == 0) {
+      // printf("level 1 block not allocated\n");
+      lvl1_addr = balloc(ip->dev);
+      if (lvl1_addr == 0)
+        return 0;
+      ip->addrs[NDIRECT + 1] = lvl1_addr;
+    }
+    // printf("level 1 block no: %d\n", lvl1_addr);
+
+    // load level 0 block, allocating if necessary'
+    struct buf *lvl1_buf = bread(ip->dev, lvl1_addr);
+    // printf("level 1 index: %d", IDX2LVL1IDX(bn + DBLBASEIDX));
+    uint lvl0_addr = ((uint *)lvl1_buf->data)[IDX2LVL1IDX(bn + DBLBASEIDX)];
+    if (lvl0_addr == 0) {
+      // printf("level 0 block not allocated\n");
+      lvl0_addr = balloc(ip->dev);
+      if (lvl0_addr == 0)
+        return 0;
+      ((uint *)lvl1_buf->data)[IDX2LVL1IDX(bn + DBLBASEIDX)] = lvl0_addr;
+      log_write(lvl1_buf);
+    }
+    // printf("level 0 block no: %d\n", lvl0_addr);
+    brelse(lvl1_buf);
+
+    // load data block, allocating if necessary
+    struct buf *lvl0_buf = bread(ip->dev, lvl0_addr);
+    // printf("level 0 index: %d", IDX2LVL0IDX(bn + DBLBASEIDX));
+    uint datablk_addr = ((uint *)lvl0_buf->data)[IDX2LVL0IDX(bn + DBLBASEIDX)];
+    if (datablk_addr == 0) {
+      // printf("data block not allocated\n");
+      datablk_addr = balloc(ip->dev);
+      if (datablk_addr == 0)
+        return 0;
+      ((uint *)lvl0_buf->data)[IDX2LVL0IDX(bn + DBLBASEIDX)] = datablk_addr;
+      log_write(lvl0_buf);
+    }
+    // printf("<-data block no: %d\n", datablk_addr);
+    brelse(lvl0_buf);
+    return datablk_addr;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -446,6 +497,30 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if (ip->addrs[NDIRECT + 1]) {
+    struct buf *lvl1_buf = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    if (lvl1_buf == 0) {
+      printf("itrunc: invalid block at level 1 node\n");
+    }
+    uint *lvl1_cont = (uint *)lvl1_buf->data;
+    for (int i = 0; i < NINDIRECT; i++) {
+      struct buf *lvl0_buf = bread(ip->dev, lvl1_cont[i]);
+      if (lvl0_buf == 0) {
+        printf("itrunc: invalid block at level 0 node\n");
+        continue;
+      }
+      uint *lvl0_cont = (uint *)lvl0_buf->data;
+      for (int j = 0; j < NINDIRECT; j++) {
+        if (lvl0_cont[j])
+          bfree(ip->dev, lvl0_cont[j]);
+      }
+      brelse(lvl0_buf);
+      bfree(ip->dev, lvl1_cont[i]); 
+    }
+    brelse(lvl1_buf);
+    bread(ip->dev, ip->addrs[NDIRECT + 1]);
   }
 
   ip->size = 0;
