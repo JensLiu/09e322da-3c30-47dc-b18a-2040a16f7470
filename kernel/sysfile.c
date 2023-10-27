@@ -503,3 +503,130 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// mmap implementation
+uint64
+sys_mmap(void)
+{
+  uint64 va; 
+  int length, prot, flags, offset;
+  struct file *f;
+  argaddr(0, &va);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, 0, &f);
+  argint(5, &offset);
+
+  if (va % PGSIZE || length % PGSIZE) {
+    printf("munmap: address or length not page aligned\n");
+    return -1;
+  }
+
+  if ((prot & PROT_WRITE) && (flags & MAP_SHARED) && !f->writable) {
+    printf("mmap: shared read/write mapping of a readonly file\n");
+    return -1;
+  }
+
+  if (va != 0 || offset != 0) {
+    printf("mmap: invalid args\n");
+    return -1;
+  }
+    
+  if ((prot & (PROT_READ | PROT_WRITE)) == 0) {
+    printf("mmap: invalid args\n");
+    return -1;
+  }
+  struct proc *p = myproc();
+
+  // pin the file discriptor to prevent deallocation
+  filedup(f);
+  
+  // we allocate space from the top to avoid collision with user stack
+  // NOTE: grows downwards
+  struct vma *vp = vma_alloc();
+  vp->va_low = p->vma_ptr - length;
+  vp->va_high = p->vma_ptr;
+  vp->va_frame_high = vp->va_high;
+  vp->va_frame_low = vp->va_low;
+  vp->f = f;
+  vp->flags = flags;
+  vp->prot = prot;
+  proc_setvma(vp, p);
+
+  p->vma_ptr -= length;
+  return p->vma_ptr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 va;
+  int dlen;
+  argaddr(0, &va);
+  argint(1, &dlen);
+
+  if (va % PGSIZE || dlen % PGSIZE) {
+    printf("munmap: address or length not page aligned\n");
+    return -1;
+  }
+
+  struct proc *p = myproc();
+  struct vma *vp = proc_getvma(va, p);
+  if (!vp) {
+    printf("munmap: invalid address\n");
+    return -1;
+  }
+
+  // by assumption, unmap only occours at the beginning
+  // or the end of the area
+  if (va != vp->va_low && va != vp->va_high) {
+    printf("invalid ummap\n");
+    return -1;
+  }
+    
+  
+  int shrink_pages = dlen/PGSIZE;
+  int topframe = vp->va_low == p->vma_ptr;
+  // write back pointers
+  uint64 begin_write = 0, end_write = 0;
+  if (vp->va_low == va) {
+    // shrink at base
+    begin_write = vp->va_low;
+    end_write = vp->va_low + dlen;
+    if (topframe) {                 // NOTE: grows downwards, the top of the stack
+      p->vma_ptr += dlen;           // update proc vma_ptr
+    }
+    vp->va_low += dlen;
+  } else if (vp->va_high == va) {
+    // shrink at top
+    end_write = vp->va_high;
+    begin_write = end_write - dlen;
+    vp->va_high -= dlen;
+  } else {
+    panic("cannot reach here\n");
+  }
+
+  if (vp->flags & MAP_SHARED) {
+    // write back files
+    // use base location to get absolute offset
+    uint64 write_offset = va - vp->va_frame_low;
+    proc_file_writeback(begin_write, end_write, write_offset, vp->f, p);
+  }
+
+  // unmap mapped location, skip unmapped ones
+  if (walkaddr(p->pagetable, va))
+    uvmunmap(p->pagetable, va, shrink_pages, 1);
+
+  // we assumed that there's no hole in vma
+  if (vp->va_high == vp->va_low) {
+    if (topframe) {
+      p->vma_ptr = vp->va_frame_high;     // restore base pointer
+    }
+    proc_unsetvma(vp, p); // it absorbs frame size of middle frame
+    fileclose(vp->f);
+    vma_relse(vp);
+  }
+
+  return 0;
+}

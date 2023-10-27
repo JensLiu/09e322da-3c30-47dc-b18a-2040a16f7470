@@ -8,6 +8,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct vma;
 
 // bio.c
 void            binit(void);
@@ -33,6 +34,12 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+struct vma *    proc_getvma(uint64, struct proc *);
+void            proc_setvma(struct vma *, struct proc *);
+void            proc_unsetvma(struct vma *, struct proc *);
+int             proc_handle_mmap(uint64, struct proc *);
+void            proc_file_writeback(uint64, uint64, uint64, struct file *, struct proc *);
+void            dup_vma(struct proc *, struct proc *);
 
 // fs.c
 void            fsinit(int);
@@ -173,6 +180,8 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+struct vma *    vma_alloc(void);
+void            vma_relse(struct vma *);
 
 // plic.c
 void            plicinit(void);

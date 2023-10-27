@@ -145,7 +145,10 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  
+  // init vma top pointer
+  p->vma_ptr = MAXVA - 2*PGSIZE;
+  p->vma_head.next = 0;
   return p;
 }
 
@@ -294,7 +297,7 @@ fork(void)
     release(&np->lock);
     return -1;
   }
-  np->sz = p->sz;
+  np->sz = p->sz;  
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -311,6 +314,9 @@ fork(void)
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
+
+  // copy vma
+  dup_vma(np, p);
 
   release(&np->lock);
 
@@ -357,6 +363,20 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // vma clean up
+  if (p->vma_head.next) {
+    struct vma *vp;
+    for (vp = p->vma_head.next; vp != 0; vp = vp->next) {
+      vma_relse(vp);
+    }
+    uint64 va = MAXVA - 2*PGSIZE;
+    uint64 va1 = p->vma_head.next->va_frame_low;
+    for (; va >= va1; va -= PGSIZE) {
+      if (walkaddr(p->pagetable, va))
+        uvmunmap(p->pagetable, va, 1, 1);
     }
   }
 

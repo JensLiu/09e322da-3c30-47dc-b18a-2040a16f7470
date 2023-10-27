@@ -180,3 +180,138 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+// according to the address, return its
+// corresponding vma structure
+struct vma *
+proc_getvma(uint64 addr, struct proc *p)
+{
+  if (!p)
+    p = myproc();
+  
+  uint64 va = PGROUNDDOWN(addr);
+  
+  struct vma *vp;
+  for (vp = p->vma_head.next; vp != 0; vp = vp->next) {
+    if (vp && vp->va_low <= va && va < vp->va_high)
+      return vp;
+  }
+  return 0;
+}
+
+// add the vma structure to the process
+void
+proc_setvma(struct vma *vmap, struct proc *p)
+{
+  if (!vmap)
+    panic("setvma: invalid vma pointer\n");
+  if (!p)
+    p = myproc();
+  
+  vmap->next = p->vma_head.next;
+  p->vma_head.next = vmap;
+}
+
+// remove the vma structure from the process
+// absorb the frame size of non-top frames
+// to avoid holes in the vma area and allow
+// the recycle of addresses
+void
+proc_unsetvma(struct vma *target_p, struct proc *p)
+{
+  if (!p)
+    p = myproc();
+  struct vma *vp;
+  for (vp = &p->vma_head; vp != 0; vp = vp->next) {
+    if (vp->next == target_p) {
+      vp->next = vp->next->next;
+      if (target_p->va_frame_low != p->vma_ptr) {
+        // if not the top frame, absorb its frame size
+        vp->va_frame_high = target_p->va_frame_high;
+      }
+      return;
+    }
+  }
+  panic("unset vma: invalid vma\n");
+}
+
+void
+proc_file_writeback(uint64 va0, uint64 va1, uint64 off, struct file *f, struct proc *p)
+{
+  if (!p)
+    p = myproc();
+  
+  pte_t *pte = 0;
+  begin_op();
+  for (uint64 va = va0; va < va1; va += PGSIZE, off += PGSIZE) {
+    pte = walk(p->pagetable, va, 0);
+    if (!pte) {
+      panic("file writeback: invalid pte\n");
+    }
+    uint64 pa = PTE2PA(*pte);
+    if (pa != 0 && PTE_FLAGS(*pte) & PTE_D) // skip unmapped, unwritten page
+      writei(f->ip, 0, pa, off, PGSIZE);
+  }
+  end_op();
+}
+
+void
+dup_vma(struct proc *np, struct proc *p)
+{
+  struct vma *vp;
+  for (vp = p->vma_head.next; vp != 0; vp = vp->next) {
+    struct vma *nvp = vma_alloc();
+    *nvp = *vp;
+    nvp->next = np->vma_head.next;
+    np->vma_head.next = nvp;
+    filedup(nvp->f);
+  }
+  np->vma_ptr = p->vma_ptr;
+}
+
+#include "fcntl.h"
+int
+proc_handle_mmap(uint64 addr, struct proc *p)
+{
+  if (!p)
+    p = myproc();
+  
+  if (!(addr < MAXVA - 2*PGSIZE && addr >= p->vma_ptr)) {
+    printf("address invalid, not a mmap fault\n");
+    return -1;
+  }
+
+  // round down address to page alligned to identify its page
+  addr = PGROUNDDOWN(addr);
+
+  struct vma *vmap = proc_getvma(addr, p);
+  if (!vmap) {
+    printf("unable to find vma\n");
+    return -1;
+  }
+  
+  // map one page of content
+  struct inode* ip = vmap->f ? vmap->f->ip : 0;
+  if (!ip) {
+    printf("invalid inode");
+    return -1;
+  }
+
+  // allocate page, vabase is page alligned
+  pte_t *pte = walk(p->pagetable, addr, 1);
+  if (pte == 0)
+    panic("mmap handler: cannot map\n");
+  uint64 pa = (uint64)kalloc();
+  memset((void *)pa, 0, PGSIZE);
+  *pte |= PA2PTE(pa);
+  *pte |= PTE_V;
+  *pte |= PTE_U;
+  *pte |= (vmap->prot & PROT_READ) ? PTE_R : 0;
+  *pte |= (vmap->prot & PROT_WRITE) ? PTE_W : 0;
+  
+  // calculate file offset
+  uint64 foff = addr - vmap->va_low;  // addr and vmap->va are page alligned
+  ilock(ip);
+  readi(ip, 0, pa, foff, PGSIZE);
+  iunlock(ip);
+  return 0;
+}

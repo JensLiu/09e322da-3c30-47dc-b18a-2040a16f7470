@@ -437,3 +437,48 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+// vma pool
+#include "spinlock.h"
+#include "vma.h"
+struct {
+  struct spinlock lk;
+  struct vma vma_table[NVMA];  
+} kvma;
+struct vma *
+vma_alloc()
+{
+  struct vma *found = 0;
+  acquire(&kvma.lk);
+  for (int i = 0; i < NVMA; i++) {
+    if (kvma.vma_table[i].used == 0) {
+      found = &kvma.vma_table[i];
+      kvma.vma_table[i].used = 1;
+      kvma.vma_table[i].va_low = 0;
+      kvma.vma_table[i].va_high = 0;
+      kvma.vma_table[i].va_frame_low = 0;
+      kvma.vma_table[i].va_frame_high = 0;
+      kvma.vma_table[i].flags = 0;
+      kvma.vma_table[i].f = 0;
+      kvma.vma_table[i].next = 0;
+      break;
+    }
+  }
+  // printf("allocated vma entry %p\n", found);s
+  release(&kvma.lk);
+  if (!found)
+    panic("vma_alloc: no vma entry\n");
+  return found;
+}
+
+void
+vma_relse(struct vma *vmap)
+{
+  if (!vmap->used)
+    panic("vma_relse: unused\n");
+  acquire(&kvma.lk);
+  // printf("released vma entry: %p\n", vmap);
+  vmap->used = 0;
+  release(&kvma.lk);
+}
+// end vma pool

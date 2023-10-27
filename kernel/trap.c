@@ -33,6 +33,19 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
+
+void
+handle_page_fault(struct proc *p)
+{
+  if (proc_handle_mmap(r_stval(), p) == 0) {
+    return;
+  }
+  // unknown type of page fault
+  printf("usertrap(): other page fault %p pid=%d\n", r_scause(), p->pid);
+  printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+  setkilled(p);
+}
+
 void
 usertrap(void)
 {
@@ -67,6 +80,9 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 0xd) {
+    // load page fault
+    handle_page_fault(p);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
