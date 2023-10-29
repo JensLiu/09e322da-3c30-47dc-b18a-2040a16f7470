@@ -19,7 +19,12 @@ static struct mbuf *rx_mbufs[RX_RING_SIZE];
 // remember where the e1000's registers live.
 static volatile uint32 *regs;
 
+// I would like to use two locks for two different
+// buffers, but the lab provided with only one lock
+// so let us explore a solution using one lock
 struct spinlock e1000_lock;
+
+#define assert(expr) if (!expr) panic("assert failed " #expr"\n")
 
 // called by pci_init().
 // xregs is the memory address at which the
@@ -101,8 +106,41 @@ e1000_transmit(struct mbuf *m)
   // the mbuf contains an ethernet frame; program it into
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
-  //
+  //  
+  acquire(&e1000_lock);
+  uint32 tail_idx = regs[E1000_TDT];
+  uint32 head_idx = regs[E1000_TDH];
+  struct tx_desc *tail = &tx_ring[tail_idx];
   
+  if (!(tail->status & E1000_TXD_STAT_DD)) {
+    // overflow
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // free possible mbufs (search 'buf\[head_idx, tail_idx)' area)
+  for (int i = tail_idx; i < head_idx + TX_RING_SIZE; i++) {
+    if ((tx_ring[i % TX_RING_SIZE].status & E1000_TXD_STAT_DD) && tx_mbufs[i % TX_RING_SIZE]) {
+      mbuffree(tx_mbufs[i % TX_RING_SIZE]);
+      tx_mbufs[i % TX_RING_SIZE] = 0;
+    }
+  }
+
+  // stash pointers
+  assert(tx_mbufs[tail_idx] == 0);
+  tx_mbufs[tail_idx] = m;
+
+  // update tx_desc for HW
+  tail->addr = (uint64) m->head;  // NOTE: not m->buf
+  tail->length = m->len;
+  // EOP: end of packet
+  // RS: report status (sets DD status)
+  tail->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tail->status &= ~E1000_RXD_STAT_DD;
+
+  // update ring position -> start transmiting
+  regs[E1000_TDT] = (tail_idx + 1) % TX_RING_SIZE;
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +153,40 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  
+  acquire(&e1000_lock);
+  uint64 tail_idx = regs[E1000_RDT]; 
+  uint64 head_idx = regs[E1000_RDH];
+  int i = (tail_idx + 1) % RX_RING_SIZE; // NOTE: start not at the tail
+  struct rx_desc *rp = &rx_ring[i];
+  int cache_idx = 0;
+  struct mbuf *buf_cache[RX_RING_SIZE];
+  for (; 
+      (rp->status & E1000_RXD_STAT_DD) && i < head_idx + RX_RING_SIZE; 
+      rp = &rx_ring[++i % RX_RING_SIZE]) {
+    
+    struct mbuf *bp = rx_mbufs[i % RX_RING_SIZE];
+    bp->head = (char *) rx_ring[i % RX_RING_SIZE].addr;
+    bp->len = rx_ring[i % RX_RING_SIZE].length;
+
+    // instead of calling net_rx(bp)
+    // cache the buffer and then unlock
+    // to avoid deadlock
+    buf_cache[cache_idx++] = bp;
+
+    bp = mbufalloc(0); 
+    if (bp == 0)
+      panic("e1000_rev: unable to alloc mbuf\n");
+    rp->status = 0;
+  }
+  
+  regs[E1000_RDT] = (i - 1) % RX_RING_SIZE;
+  release(&e1000_lock);
+
+  for (i = 0; i < cache_idx; i++) {
+    net_rx(buf_cache[i]);
+  }
+
 }
 
 void

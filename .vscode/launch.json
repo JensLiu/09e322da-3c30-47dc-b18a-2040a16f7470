@@ -1,0 +1,36 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/kernel/kernel",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "miDebuggerServerAddress": "127.0.0.1:26000",
+            "miDebuggerPath": "/usr/local/bin/riscv64-unknown-elf-gdb",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "enable hex",
+                    "text": "-gdb-set output-radix 16",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+}
